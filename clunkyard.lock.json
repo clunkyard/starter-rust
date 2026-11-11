@@ -1,18 +1,18 @@
 {
-  "version": "v2.0.0-kit.1",
+  "version": "v2.0.0-kit.2",
   "sdkVersion": "2.0.0",
   "language": "rust",
   "portable": false,
   "engine": {
-    "file": "clunkyard-engine-v2.0.0-kit.1.tar.gz",
-    "url": "https://github.com/clunkyard/game-kit/releases/download/v2.0.0-kit.1/clunkyard-engine-v2.0.0-kit.1.tar.gz",
+    "file": "clunkyard-engine-v2.0.0-kit.2.tar.gz",
+    "url": "https://github.com/clunkyard/game-kit/releases/download/v2.0.0-kit.2/clunkyard-engine-v2.0.0-kit.2.tar.gz",
     "bytes": 7071301,
     "sha256": "0b9cfa6958a952c32388602821ec4275e61400255f91b212f9c2a9220f8a0d86",
     "expandedBytes": 33794538
   },
   "sdk": {
-    "file": "clunkyard-sdk-rust-linux-x64-v2.0.0-kit.1.tar.gz",
-    "url": "https://github.com/clunkyard/game-kit/releases/download/v2.0.0-kit.1/clunkyard-sdk-rust-linux-x64-v2.0.0-kit.1.tar.gz",
+    "file": "clunkyard-sdk-rust-linux-x64-v2.0.0-kit.2.tar.gz",
+    "url": "https://github.com/clunkyard/game-kit/releases/download/v2.0.0-kit.2/clunkyard-sdk-rust-linux-x64-v2.0.0-kit.2.tar.gz",
     "bytes": 7763550,
     "sha256": "a744cf5bd3c2c94377f9b56c455499545b8270dc18ae3a26ceb55d504ddca136",
     "expandedBytes": 53770880
@@ -23,6 +23,8 @@
   "tools": [
     "node",
     "make",
-    "rustc"
-  ]
+    "rustc",
+    "cc"
+  ],
+  "requirements": {}
 }

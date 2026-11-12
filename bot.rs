@@ -48,6 +48,13 @@ struct Starter { free_flight: bool }
 fn steer(robot: &Robot, towards: f64, current: f64) -> Result<f64, Error> {
     robot.angles.clamp(robot.angles.angle_diff(towards, current)? / 45.0, -1.0, 1.0)
 }
+// The arena's calibration kernel, xorshift-sqrt v1; safe to delete.
+fn calibration_work(work: u64, tick: u64) -> f64 {
+    let mut x = 88172645463325252u64 ^ tick;
+    let mut sum = 0.0;
+    for _ in 0..work { x ^= x << 13; x ^= x >> 7; x ^= x << 17; sum += ((x >> 11) as f64).sqrt(); }
+    ((sum.floor() as u64 + (x >> 40)) % 1000000) as f64
+}
 impl Strategy for Starter {
     fn on_start(&mut self, robot: &Robot) -> Result<(), Error> {
         self.free_flight = robot.r#match.is_3d()? && robot.arena.gravity()?.z == 0.0;
@@ -99,6 +106,9 @@ impl Strategy for Starter {
                 let climb = if zone.shape == clunkyard::SHAPE_SPHERE { robot.angles.elevation_to(&position, &zone.center)? } else { 0.0 };
                 robot.drive.set(Some(0.8), Some(robot.angles.clamp(robot.angles.angle_diff(bearing, heading)? / 30.0, -1.0, 1.0)?), Some(robot.angles.clamp((climb - pitch) / 30.0, -1.0, 1.0)?))?;
             }
+        }
+        if let Some(work) = robot.raw.number("state.calibration.work")? {
+            if work >= 1.0 { robot.status.set(Some("WORK"), Some(calibration_work(work as u64, tick as u64)))?; }
         }
         Ok(())
     }

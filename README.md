@@ -14,6 +14,10 @@ npx @clunkyard/cli replay
 
 If you use Make, the equivalent commands are `make doctor`, `make`, `make match` and `make replay`. The CLI downloads the local match engine and your language's SDK. Downloads and build output stay in `.clunkyard/`.
 
+This robot builds to WebAssembly (wasm32-wasip1), as the hosted builder does, and runs on the Wasmtime host metered by fuel, which counts the same on every computer. In Season 3 its fuel tier is 1 (rates/s3.json); a local match uses the same fuel budget as Standard. Install the wasm32-wasip1 Rust target, normally with rustup target add wasm32-wasip1; the kit rebuilds the Rust binding for it with your rustc.
+
+Set "target": "native" in bot.json to build with rustc instead. A native build plays Open only: Standard refuses it. Other platforms build natively until their SDK carries the WebAssembly host.
+
 The [language guide](https://clunkyard.com/sdk/rust) covers the robot API and your toolchain. Use `doctor` to check your installation.
 
 ## Repeat a trial

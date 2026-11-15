@@ -1,5 +1,7 @@
 // A robot on the Clunkyard core's Rust binding. The core owns tracking,
 // geometry and protocol handling; this strategy chooses the tactics.
+// It searches with a broad scan, narrows the beam on a contact, and leads
+// shots from a line through its recent sightings.
 // Clunkyard robot API 2.0.0: one core under every language, the same
 // answers everywhere. Facts (a call shows its arguments):
 // match: mode ruleset control robots is_3d tick_rate max_ticks
@@ -43,10 +45,43 @@
 // your language cases them its own way. Angles are degrees from the +x
 // axis; pitch is positive up.
 // Manual: https://clunkyard.com/manual#sdk
-use clunkyard::{Error, Robot, Strategy};
+use clunkyard::{Error, Robot, Strategy, Vec3};
+
+// Bearing is earned: a scan contact's bearing is off by up to its bearing_error
+// (degrees, a fixed share of the arc), so a wide beam finds a robot and a narrow
+// one aims at it. Contacts within 120 units are exact.
+const SEARCH_ARC: f64 = 40.0; // degrees: sweeps the circle in half a second
+const HOLD_WIDTH: f64 = 60.0; // units across at the target: it stays in the beam from tick to tick
+const MIN_ARC: f64 = 6.0;     // degrees: the narrowest the beam holds
+const WINDOW: i32 = 12;       // ticks of sightings the aim averages
+const SIGHTINGS: usize = 8;   // narrow sightings in the window before a shot
+const LOOK_EVERY: i32 = 40;   // ticks between looks around the target, for a nearer robot
+const REACQUIRE: i32 = 10;    // ticks to look again where a lost target was
 
 #[derive(Default)]
-struct Starter { free_flight: bool, dodge_ticks: u32, dodges: u32 }
+struct Starter { free_flight: bool, dodge_ticks: u32, dodges: u32, slot: i32 }
+// A straight line through the narrowest of the last WINDOW ticks' sightings:
+// where the robot is now and how fast it moves. Each sighting is off by its
+// bearing_error; the line averages that out. Returns the position, velocity and sightings used.
+fn fit(robot: &Robot, slot: i32, tick: i32) -> Result<Option<(Vec3, Vec3, usize)>, Error> {
+    let recent: Vec<_> = robot.tracker.history(slot)?.into_iter().filter(|s| s.tick > tick - WINDOW).collect();
+    if recent.len() < 2 { return Ok(None); }
+    let best = recent.iter().map(|s| s.bearing_error).fold(f64::INFINITY, f64::min);
+    let seen: Vec<_> = recent.iter().filter(|s| s.bearing_error <= 1.5 * best).collect();
+    if seen.len() < 2 { return Ok(None); }
+    let n = seen.len() as f64;
+    let t0 = seen.iter().map(|s| s.tick as f64).sum::<f64>() / n;
+    let spread: f64 = seen.iter().map(|s| (s.tick as f64 - t0).powi(2)).sum();
+    let rate = robot.r#match.tick_rate()? as f64;
+    // Least squares on one axis: its fitted position now and its speed per second.
+    let line = |axis: fn(&Vec3) -> f64| {
+        let mean = seen.iter().map(|s| axis(&s.position)).sum::<f64>() / n;
+        let slope = seen.iter().map(|s| (s.tick as f64 - t0) * (axis(&s.position) - mean)).sum::<f64>() / spread;
+        (mean + slope * (tick as f64 - t0), slope * rate)
+    };
+    let (x, y, z) = (line(|p| p.x), line(|p| p.y), line(|p| p.z));
+    Ok(Some((Vec3 { x: x.0, y: y.0, z: z.0 }, Vec3 { x: x.1, y: y.1, z: z.1 }, seen.len())))
+}
 fn steer(robot: &Robot, towards: f64, current: f64) -> Result<f64, Error> {
     robot.angles.clamp(robot.angles.angle_diff(towards, current)? / 45.0, -1.0, 1.0)
 }
@@ -59,18 +94,40 @@ impl Strategy for Starter {
         let position = robot.me.position()?;
         let (heading, pitch, tick) = (robot.me.heading()?, robot.me.pitch()?, robot.clock.tick()?);
         robot.drive.forces(None, None, None, None, None, None, Some(0.2))?;
+        let last_seen = if self.slot != 0 { robot.tracker.last_seen(self.slot)? } else { None };
         if let Some(target) = robot.sensors.nearest()? {
+            self.slot = target.slot;
             let throttle = if target.range > 350.0 { 0.7 } else if target.range < 200.0 { -0.4 } else { 0.2 };
             robot.drive.set(Some(throttle), Some(steer(robot, target.bearing, heading)?), Some(steer(robot, target.elevation, pitch)?))?;
-            robot.scanner.set(Some(target.bearing), Some(20.0), Some(target.elevation))?;
-            // gun.lead is the intercept if the target holds course.
+            // Halve the beam each tick until it is HOLD_WIDTH across at the target:
+            // narrow enough for a precise bearing, wide enough to keep it in.
+            let hold = MIN_ARC.max(2.0 * (HOLD_WIDTH / 2.0).atan2(target.range).to_degrees());
+            // In a crowd a narrow beam sees one robot. Every LOOK_EVERY ticks, widen it
+            // for a tick: a nearer robot it finds becomes the target.
+            let arc = if tick % LOOK_EVERY == 0 { SEARCH_ARC } else { hold.max(SEARCH_ARC.min(robot.scanner.last()?.arc / 2.0)) };
+            robot.scanner.set(Some(target.bearing), Some(arc), Some(target.elevation))?;
             let power = robot.gun.power_for_flight_time(target.range, 1.0)?;
-            let aim = robot.gun.lead(&target, power)?;
+            // An exact contact: gun.lead is the intercept if the target holds course.
+            // A noisy one: lead the fitted line, and fire only once it rests on enough sightings.
+            let (aim, ready) = if target.bearing_error > 0.0 {
+                match fit(robot, target.slot, tick)? {
+                    Some((position, velocity, count)) => { let aim = robot.gun.lead_point(&position, &velocity, power)?; let ready = aim.is_some() && count >= SIGHTINGS; (aim, ready) }
+                    None => (None, false),
+                }
+            } else { (robot.gun.lead(&target, power)?, true) };
             let (towards, up) = aim.map(|aim| (aim.heading, aim.pitch)).unwrap_or((target.bearing, target.elevation));
             robot.gun.aim(Some(towards), Some(up))?;
             let now = robot.gun.aim_now()?;
-            if robot.angles.angle_diff(towards, now.heading)?.abs() < 3.0 && (up - now.pitch).abs() < 3.0 && robot.gun.can_fire(power, 10.0)? { robot.gun.fire(Some(power))?; }
-            robot.status.set(Some("TRACK"), Some(target.range))?;
+            if ready && robot.angles.angle_diff(towards, now.heading)?.abs() < 3.0 && (up - now.pitch).abs() < 3.0 && robot.gun.can_fire(power, 10.0)? { robot.gun.fire(Some(power))?; }
+            robot.status.set(Some(if ready { "TRACK" } else { "NARROW" }), Some(target.range))?;
+        } else if last_seen.is_some_and(|seen| tick - seen <= REACQUIRE) {
+            // Lost it: look again where it was last seen, widening the beam, before searching.
+            let at = robot.tracker.position(self.slot)?.unwrap_or(position);
+            let bearing = robot.angles.bearing_to(&position, &at)?;
+            let elevation = if self.free_flight { robot.angles.elevation_to(&position, &at)? } else { 0.0 };
+            robot.drive.set(Some(0.5), Some(steer(robot, bearing, heading)?), Some(steer(robot, elevation, pitch)?))?;
+            robot.scanner.set(Some(bearing), Some(SEARCH_ARC.min(robot.scanner.last()?.arc * 2.0)), Some(elevation))?;
+            robot.status.set(Some("REACQUIRE"), None)?;
         } else if let Some(cue) = robot.tracker.cue()? {
             let bearing = robot.angles.bearing_to(&position, &cue.position)?;
             let distance = robot.angles.distance(&position, &cue.position)?;
@@ -84,7 +141,7 @@ impl Strategy for Starter {
         } else {
             robot.drive.set(Some(0.5), Some(0.33), Some(steer(robot, 0.0, pitch)?))?;
             let up = if self.free_flight { ((tick / 10) % 3 - 1) as f64 * 35.0 } else { 0.0 };
-            robot.scanner.set(Some(robot.angles.normalize(robot.scanner.last()?.heading + 36.0)?), Some(40.0), Some(up))?;
+            robot.scanner.set(Some(robot.angles.normalize(robot.scanner.last()?.heading + 36.0)?), Some(SEARCH_ARC), Some(up))?;
             robot.status.set(Some("SEARCH"), None)?;
         }
         // A simple dodge: vary it, or predict the shooter.

@@ -7,7 +7,8 @@
 // clock: tick seconds remaining_ticks
 // arena: size gravity terrain_kind ground_height(x y)
 // me: health position velocity heading pitch roll angular_velocity
-//   attitude grounded altitude applied
+//   attitude grounded altitude applied hull_mounts to_mount(heading pitch)
+//   from_mount(heading pitch) mount_toward(point)
 // battery: charge capacity regen sustainable_drive compute
 //   drive_cost(fraction)
 // drive: hover_lift
@@ -29,7 +30,8 @@
 // score: me best armour
 // angles: normalize(degrees) angle_diff(target current)
 //   bearing_to(from to) elevation_to(from to) direction(heading pitch)
-//   distance(a b) clamp(value low high)
+//   distance(a b) to_chassis(heading pitch attitude)
+//   from_chassis(heading pitch attitude) clamp(value low high)
 // raw: number(path) text(path) has(path) flag(path) count(path) line()
 // Controls: drive.set(throttle turn pitch_turn)
 //   drive.forces(thrust strafe lift yaw_torque pitch_torque roll_torque brake)
@@ -44,7 +46,7 @@
 use clunkyard::{Error, Robot, Strategy};
 
 #[derive(Default)]
-struct Starter { free_flight: bool }
+struct Starter { free_flight: bool, dodge_ticks: u32, dodges: u32 }
 fn steer(robot: &Robot, towards: f64, current: f64) -> Result<f64, Error> {
     robot.angles.clamp(robot.angles.angle_diff(towards, current)? / 45.0, -1.0, 1.0)
 }
@@ -61,6 +63,7 @@ impl Strategy for Starter {
             let throttle = if target.range > 350.0 { 0.7 } else if target.range < 200.0 { -0.4 } else { 0.2 };
             robot.drive.set(Some(throttle), Some(steer(robot, target.bearing, heading)?), Some(steer(robot, target.elevation, pitch)?))?;
             robot.scanner.set(Some(target.bearing), Some(20.0), Some(target.elevation))?;
+            // gun.lead is the intercept if the target holds course.
             let power = robot.gun.power_for_flight_time(target.range, 1.0)?;
             let aim = robot.gun.lead(&target, power)?;
             let (towards, up) = aim.map(|aim| (aim.heading, aim.pitch)).unwrap_or((target.bearing, target.elevation));
@@ -83,6 +86,23 @@ impl Strategy for Starter {
             let up = if self.free_flight { ((tick / 10) % 3 - 1) as f64 * 35.0 } else { 0.0 };
             robot.scanner.set(Some(robot.angles.normalize(robot.scanner.last()?.heading + 36.0)?), Some(40.0), Some(up))?;
             robot.status.set(Some("SEARCH"), None)?;
+        }
+        // A simple dodge: vary it, or predict the shooter.
+        if self.dodge_ticks == 0 && robot.sensors.cues()?.iter().any(|heard| heard.source == clunkyard::SOURCE_MUZZLE) {
+            self.dodges += 1;
+            self.dodge_ticks = 10;
+        }
+        if self.dodge_ticks > 0 {
+            // Odd dodges go left, even ones right; turn +1 and strafe -1 go left.
+            let left = self.dodges % 2 == 1;
+            self.dodge_ticks -= 1;
+            if robot.r#match.control()? == clunkyard::CONTROL_FORCES {
+                robot.drive.set(Some(0.5), None, None)?;
+                robot.drive.forces(None, Some(if left { -1.0 } else { 1.0 }), None, None, None, None, None)?;
+            } else {
+                robot.drive.set(Some(1.0), Some(if left { 1.0 } else { -1.0 }), None)?;
+            }
+            robot.status.set(Some(if left { "dodge:left" } else { "dodge:right" }), Some(self.dodges as f64))?;
         }
         if robot.battery.charge()? < robot.battery.capacity()? / 4.0 {
             robot.drive.set(Some(robot.drive.get_throttle()?.unwrap_or(0.0) * 0.5), None, None)?;
